@@ -1,32 +1,19 @@
 
 import numpyro
-from numpyro.distributions import constraints
+from numpyro.infer import MCMC, NUTS
+numpyro.set_platform('gpu')
+
 from jax import numpy as jnp
 from jax import random
 import arviz as az
 
-from scipy.stats import linregress
-
-from numpyro.infer import MCMC, NUTS, Predictive
-
-# import pyro
-# import pyro.distributions as dist
-# import pyro.poutine as poutine
-# from pyro.infer import Predictive
-
-import torch
 import time
+import pickle
+
 import pandas as pd
 import numpy as np
 
-# from pyro.infer import SVI, Trace_ELBO
-#
-# import torch.distributions.constraints as constraints
-
 from simulation_code import DataSimulator
-# from utils import compare_to_gt
-
-import pickle
 
 def two_nodes_run_level(data, missing, priors=None):
 
@@ -35,20 +22,17 @@ def two_nodes_run_level(data, missing, priors=None):
     beta1 = numpyro.sample("beta1", numpyro.distributions.Normal(.5, .25))
     mar = numpyro.sample("mar", numpyro.distributions.LogNormal(-3.5, .1))
 
-
-    ## TODO: BAD VECTORIZE
-    # with numpyro.plate("Protein_plate", len(data)):
+    ## Initialize model variables
     run_mu_list = numpyro.sample("mu", numpyro.distributions.Normal(priors["run_effect"], 2.))
-
-    ## Feature means
     feature_mu_list = numpyro.sample("bF", numpyro.distributions.Normal(priors["feature_effect"], 1.))
-
-    ## Error
     sigma = numpyro.sample("error", numpyro.distributions.Exponential(1.))
 
+    ## Get model param for each obs
+    ## TODO: Flatten the matrices to avoid having to pad with zeros
     run_mu = run_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 0].astype(int)]
     feature_mu = feature_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 1].astype(int)]
 
+    ## Calculate missingness probability
     mnar_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * (run_mu + feature_mu)) - (.5*beta1*sigma)))
     mnar_not_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * (run_mu + feature_mu))))
     mnar = jnp.where(missing, mnar_missing, mnar_not_missing)
@@ -58,6 +42,8 @@ def two_nodes_run_level(data, missing, priors=None):
     numpyro.distributions.constraints.positive(numpyro.sample("missing",
                           numpyro.distributions.Bernoulli(probs=missing_prob),
                           obs=missing))
+
+    ## Infer missing values
     adjustment = mnar/(mar+mnar)*(.5 * beta1 * sigma)
 
     imp_means = (run_mu + feature_mu - adjustment).flatten()
@@ -67,10 +53,11 @@ def two_nodes_run_level(data, missing, priors=None):
             sigma).mask(False)
     )
 
+    ## Add imputed missing values to observations
     obs = data[:, :, 2]
-    ## replace indices in a 2d numpy array with those in another 2d array
     observed = jnp.asarray(obs).at[missing].set(imp)
 
+    ## Sample with obs
     mean = jnp.where(missing,
                      run_mu + feature_mu - adjustment,
                      run_mu + feature_mu)
@@ -212,15 +199,14 @@ class IndependentModel:
 
         mcmc.run(random.PRNGKey(69), format_data, missing, priors=self.priors)
         finish = time.time()
-        print("Time to train: {}".format(finish - start))
         keep = finish-start
 
         print(mcmc.print_summary())
+        print("Time to train: {}".format(keep))
 
         idata = az.from_numpyro(mcmc)
-        with open(r"data/real_data_20_proteins.pickle", "wb") as output_file:
-            pickle.dump(idata, output_file)
-
+        self.az_mcmc_results = idata
+        self.mcmc_samples = mcmc.get_samples()
 
 def main():
     with open(r"data/simulated_data_25.pickle", "rb") as input_file:
@@ -228,19 +214,13 @@ def main():
     input_data = simulator.data
     # input_data = pd.read_csv(r"data/Choi2017_model_input.csv")
     # sample_proteins = np.random.choice(input_data["Protein"].unique(), 100)
-    # # sample_proteins = ['P47133', 'P40078', 'Q03327', 'P38803', 'P38255', 'Q12402',
-    # #                    'P40302', 'P36120', 'P36141', 'P07283',
-    # #                    'P35724', 'Q01852', 'Q02159', 'Q01662', 'P38758', 'P38889',
-    # #                    'P40024', 'P53741', 'P40040', 'P50087', 'P25617', 'P54839',
-    # #                    'P53301', 'P38332', 'P31383', 'P08964', 'P53163', 'Q04693',## Works
-    # #                    'P40015', 'Q02455', 'P38882', 'P36154', 'P20606', 'Q12198',
-    # #                    'Q06142', 'P50101', 'P40989', 'Q06682', 'P32465', 'P47031',
-    # #                    'P38708', 'P34232', 'P39743', 'P35179', 'Q02256', 'Q06708']
-    # # print(sample_proteins)
     # input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
-    # input_data = input_data.loc[input_data["Protein"].isin(["P40527", "P48363"])]
+
     model = IndependentModel()
     model.train(input_data, 10000, 10000)
+
+    with open(r"model_results/az_mcmc_results.pickle", "wb") as output_file:
+        pickle.dump(model.az_mcmc_results, output_file)
 
 if __name__ == "__main__":
     main()
