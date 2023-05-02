@@ -5,7 +5,7 @@ numpyro.set_platform('gpu')
 
 from jax import numpy as jnp
 from jax import random
-import arviz as az
+import az.from_numpyro as az_numpy
 
 import time
 import pickle
@@ -204,7 +204,7 @@ class IndependentModel:
         print(mcmc.print_summary())
         print("Time to train: {}".format(keep))
 
-        idata = az.from_numpyro(mcmc)
+        idata = az_numpy(mcmc)
         self.az_mcmc_results = idata
         self.mcmc_samples = mcmc.get_samples()
 
