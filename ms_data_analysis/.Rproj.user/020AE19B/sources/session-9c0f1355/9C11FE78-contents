@@ -1,0 +1,151 @@
+
+##############################
+#### Analysis in MSstats
+##############################
+
+##############################
+## Load MSstats package
+##############################
+library(MSstats)
+
+##############################
+## Read MaxQuant report
+##############################
+# read in proteinGroups file, in order to use protein ids
+proteinGroups<-read.table("Choi2017_DDA_MaxQuant_proteinGroups.txt", sep="\t", header=TRUE)
+
+# Read in MaxQuant file: evidence.txt
+infile <- read.table("Choi2017_DDA_MaxQuant_evidence.txt", sep="\t", header=TRUE)
+
+# Read in annotation including condition and biological replicates
+annot <- read.csv("Choi2017_DDA_MaxQuant_annotation.csv", header=TRUE)
+
+
+##############################
+## Make MSstats required format
+##############################
+quant <- MaxQtoMSstatsFormat(evidence=infile, annotation=annot, proteinGroups=proteinGroups,
+                             useUniquePeptide = TRUE,
+                             summaryforMultipleRows = max,
+                             removeProtein_with1Peptide=TRUE)
+
+quant %>% distinct(Condition, Run)
+
+prec = lm(log2(Intensity)~PrecursorCharge, data=as.data.frame(quant) %>% 
+              select(Intensity, PrecursorCharge, Condition) %>% filter(PrecursorCharge < 4) %>% 
+              mutate(PrecursorCharge = as.factor(PrecursorCharge)))
+summary(prec)
+
+missing_val_test = data.frame(ProteinName = rep("Protein1", 12),
+                              PeptideSequence = rep(c("Pep1", "Pep2", "Pep3"), 
+                                                    each=4),
+                              # PeptideModifiedSequence = rep(c("Pep1", "Pep2", "Pep3"), 
+                              #                                each=2),
+                              PrecursorCharge = rep(2, 12),
+                              FragmentIon = rep(NA, 12), 
+                              ProductCharge = rep(NA, 12),
+                              IsotopeLabelType = rep("L", 12),
+                              Condition = rep(c("Cond1", "Cond2"), 6),
+                              BioReplicate = rep(c(1,2,3,4),3), 
+                              Run = rep(c(1,2,3,4),3),
+                              Fraction = rep(1,12),
+                              Intensity=(2**c(18.,20.,17.,19.,
+                                              19.,21.,20.,22.,
+                                              21.,23.,22.,NA))
+                              )
+
+# c(18.,20.,17.,19.,
+#   19.,21.,20.,22.,
+#   21.,23.,22.,24.)
+
+missing_val_test %>% ggplot() + geom_line(aes(x=paste(Condition, Run), y=log2(Intensity), group=PeptideSequence))
+
+progenesis_raw = system.file("tinytest/raw_data/Progenesis/progenesis_input.csv",
+                             package = "MSstatsConvert")
+annot = system.file("tinytest/raw_data/Progenesis/progenesis_annot.csv",
+                    package = "MSstatsConvert")
+progenesis_raw = data.table::fread(progenesis_raw)
+annot = data.table::fread(annot)
+#' 
+processed.quant <- dataProcess(missing_val_test,
+                               normalization = FALSE,
+                               min_feature_count = 0,
+                               summaryMethod="TMP",
+                               MBimpute=TRUE,
+                               maxQuantileforCensored=1.)
+
+##############################
+## dataProcess
+## including Normalization, decide censored cutoff, protein-level summarization
+##############################
+
+## censoredInt='NA' for MaxQuant
+processed.quant <- dataProcess(quant,
+                               normalization = 'equalizeMedians',
+                               summaryMethod="TMP",
+                               cutoffCensored="minFeature",
+                               censoredInt="NA",
+                               MBimpute=TRUE,
+                               maxQuantileforCensored=0.999)
+
+save(processed.quant, file='processed.quant.rda')
+
+##############################
+## Data visualization
+##############################
+
+dataProcessPlots(processed.quant, type="QCplot", 
+                 ylimDown=0, 
+                 which.Protein = 'allonly',
+                 width=7, height=7,  
+                 address="Choi2016_DDA_MaxQuant_")
+
+dataProcessPlots(processed.quant, type="Profileplot", 
+                 ylimDown=0, 
+                 originalPlot = TRUE,
+                 summaryPlot = TRUE,
+                 width=7, height=7,  
+                 address="Choi2016_DDA_MaxQuant_")
+
+dataProcessPlots(processed.quant, type="Conditionplot", 
+                 ylimDown=0, 
+                 width=7, height=7,  
+                 address="Choi2016_DDA_MaxQuant_")
+
+
+##############################
+## Model-based comparison + adjust p-value
+##############################
+
+comparison1<-matrix(c(-1,1,0,0),nrow=1)
+comparison2<-matrix(c(-1,0,1,0),nrow=1)
+comparison3<-matrix(c(-1,0,0,1),nrow=1)
+comparison4<-matrix(c(0,-1,1,0),nrow=1)
+comparison5<-matrix(c(0,-1,0,1),nrow=1)
+comparison6<-matrix(c(0,0,-1,1),nrow=1)
+comparison <- rbind(comparison1, comparison2, comparison3, comparison4, comparison5, comparison6)
+row.names(comparison)<-c("C2-C1","C3-C1","C4-C1","C3-C2","C4-C2","C4-C3")
+
+
+test.MSstats <- groupComparison(contrast.matrix=comparison, data=processed.quant)
+test.MSstats <- test.MSstats$ComparisonResult
+
+##############################
+## save the result
+##############################
+
+save(test.MSstats, file='test.MSstats.rda')
+write.csv(test.MSstats, file='Choi2016_DDA_MaxQuant_testResult_byMSstats.csv')
+
+
+##############################
+## Visualization of result
+##############################
+groupComparisonPlots(data=test.MSstats, type="VolcanoPlot",
+                     width=6, height=6,
+                     address="Choi2016_DDA_MaxQuant_")
+
+groupComparisonPlots(data=test.MSstats, type="ComparisonPlot",
+                     width=6, height=6,
+                     address="Choi2016_DDA_MaxQuant_")
+

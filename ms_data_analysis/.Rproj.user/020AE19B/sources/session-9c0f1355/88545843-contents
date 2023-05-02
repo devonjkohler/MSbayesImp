@@ -1,0 +1,45 @@
+
+## packages
+library(tidyverse)
+library(MSstats)
+
+setwd("D://OneDrive - Northeastern University//Northeastern//Research//MSstats//Data//DDA_Choi2017")
+
+## Load data
+evidence = read.csv("Choi2017_DDA_MaxQuant_evidence.txt", sep="\t")
+pg = read.csv("Choi2017_DDA_MaxQuant_proteinGroups.txt", sep="\t")
+annotation = read.csv("Choi2017_DDA_MaxQuant_annotation.csv")
+
+msstats_input_data = MaxQtoMSstatsFormat(evidence, annotation, pg,
+                                         removeFewMeasurements = FALSE)
+msstats_input_data = as.data.frame(msstats_input_data)
+msstats_input_data = msstats_input_data %>% filter(!grepl(";", ProteinName))
+
+## Get summary stats
+## N proteins
+n_prot = length(unique(msstats_input_data$ProteinName))
+
+## N cond
+n_cond = length(unique(msstats_input_data$Condition))
+
+## N run
+n_run = length(unique(msstats_input_data$Run))
+
+## N feat
+msstats_input_data$Feature = paste(msstats_input_data$PeptideSequence, 
+                                   msstats_input_data$PrecursorCharge, sep="_")
+n_feat = length(unique(msstats_input_data$Feature))
+n_feat_per_prot = n_feat/n_prot
+
+print(n_prot)
+print(n_cond)
+print(n_run)
+print(n_feat_per_prot)
+
+## Prep data for model
+input_data = msstats_input_data %>% 
+  select(ProteinName, Condition, Run, Feature, Intensity)
+input_data$Intensity = log2(input_data$Intensity)
+input_data$Missing = ifelse(is.na(input_data$Intensity), 1, 0)
+input_data = input_data %>% rename(c(Protein = ProteinName))
+input_data %>% write.csv(file="Choi2017_model_input.csv", row.names=FALSE)
