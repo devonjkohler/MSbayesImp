@@ -1,5 +1,5 @@
 
-!/usr/bin/env python3.7
+# !/usr/bin/env python3.7
 import sys
 import builtins
 import os
@@ -12,7 +12,7 @@ print("This is immediately written to stdout.txt")
 
 import numpyro
 from numpyro.infer import MCMC, NUTS
-# numpyro.set_platform('gpu')
+numpyro.set_platform('gpu')
 # numpyro.set_host_device_count(2)
 
 import jax
@@ -92,143 +92,92 @@ class IndependentModel:
 
     def format_data(self, data):
 
-        input_data = list()
-        model_params = dict()
-
         formatted_data = data.loc[:, ["Protein", "Condition", "Run", "Feature", "Intensity", "Missing"]]
-        for col in ["Protein", "Condition", "Run"]:
+        for col in ["Protein", "Condition", "Run", "Feature"]:
             if formatted_data[col].dtype == 'O':
                 formatted_data.loc[:, col] = formatted_data.loc[:, col].astype("category").cat.codes
 
         formatted_data.loc[:, "Condition_run"] = formatted_data.loc[:, "Condition"].astype(str) + "_" + \
                                                  formatted_data.loc[:, "Run"].astype(str)
         formatted_data.loc[:, "Run"] = formatted_data.loc[:, "Condition_run"].astype("category").cat.codes
-        formatted_data = formatted_data.drop(columns=["Condition"])
-        # formatted_data.loc[:, "Dummy_Condition"] = formatted_data.loc[:, "Condition"].astype(str)
-        # formatted_data.loc[:, "Dummy_Run"] = formatted_data.loc[:, "Run"].astype(str)
-        # formatted_data.loc[:, "Dummy_Feature"] = formatted_data.loc[:, "Feature"].astype(str)
-        for i in formatted_data["Protein"].unique():
+        formatted_data = formatted_data.drop(columns=["Condition", "Condition_run"])
 
-            temp_data = formatted_data.loc[formatted_data["Protein"] == i]
-            if temp_data["Feature"].dtype == 'O':
-                temp_data.loc[:, "Feature"] = temp_data.loc[:, "Feature"].astype("category").cat.codes
+        formatted_data.loc[:, "Missing"] = np.where(np.isnan(formatted_data["Intensity"]), 1., 0.)
+        formatted_data = formatted_data.sort_values(by=["Protein", "Feature", "Run"])
 
-            temp_data = pd.get_dummies(temp_data, drop_first=False)
-            temp_data.loc[:, "Missing"] = np.where(np.isnan(temp_data["Intensity"]), 1., 0.)
-            # n_conds = len(temp_data.columns[temp_data.columns.str.contains("Dummy_Condition")])
-            # n_runs = len(temp_data.columns[temp_data.columns.str.contains("Dummy_Run")])
-            n_runs = len(temp_data.loc[:, "Run"].unique())
-            n_feat = len(temp_data.loc[:, "Feature"].unique())
-            # n_feat = len(temp_data.columns[temp_data.columns.str.contains("Dummy_Feature")])
-            model_params[i] = {"Runs" : n_runs,
-                               "Features" : n_feat}
-            temp_data = jnp.asarray(temp_data.values)
-            temp_data = np.nan_to_num(temp_data, nan=0.)
-            input_data.append(temp_data)
+        formatted_data = formatted_data.fillna(0.)
 
-        input_data = np.array(input_data)
+        return formatted_data.values
 
-        return input_data, model_params
+    def flatten_input(self, data):
 
-    def flatten_input(self, data, priors):
+        data = pd.DataFrame(data, columns=["Protein", "Run", "Feature", "Intensity", "Missing"])
 
         ## Format input data to be ready for flatten
-        data = data[:, :, :4].reshape(data.shape[0]*data.shape[1], 4)
-
-        lookup_table = pd.DataFrame(data, columns=["Protein", "Run", "Feature", "Intensity"])
-        lookup_table.loc[:, "list_index"] = np.arange(len(lookup_table))
-        lookup_table.loc[:, "Protein_run"] = lookup_table.loc[:, "Protein"].astype(str) + "_" + \
-            lookup_table.loc[:, "Run"].astype(str)
-        lookup_table.loc[:, "Protein_feature"] = lookup_table.loc[:, "Protein"].astype(str) + "_" + \
-                                             lookup_table.loc[:, "Feature"].astype(str)
+        data.loc[:, "list_index"] = np.arange(len(data))
+        data.loc[:, "Protein_run"] = data.loc[:, "Protein"].astype(str) + "_" + data.loc[:, "Run"].astype(str)
+        data.loc[:, "Protein_feature"] = data.loc[:, "Protein"].astype(str) + "_" + data.loc[:, "Feature"].astype(str)
 
         ## TODO: This is sorta gross but cat.codes doesn't create these in order
-        lookup_table = pd.merge(lookup_table, pd.DataFrame({"Protein_run" : lookup_table.loc[:, "Protein_run"].unique(),
-                      "Protein_run_idx" : np.arange(len(lookup_table.loc[:, "Protein_run"].unique()))}),
+        data = pd.merge(data, pd.DataFrame({"Protein_run" : data.loc[:, "Protein_run"].unique(),
+                      "Protein_run_idx" : np.arange(len(data.loc[:, "Protein_run"].unique()))}),
                  on="Protein_run", how="left")
-        lookup_table = pd.merge(lookup_table, pd.DataFrame({
-            "Protein_feature" : lookup_table.loc[:, "Protein_feature"].unique(),
-            "Protein_feature_idx" : np.arange(len(lookup_table.loc[:, "Protein_feature"].unique()))}),
+        data = pd.merge(data, pd.DataFrame({
+            "Protein_feature": data.loc[:, "Protein_feature"].unique(),
+            "Protein_feature_idx": np.arange(len(data.loc[:, "Protein_feature"].unique()))}),
                  on="Protein_feature", how="left")
 
         ## Return data for model and interpretation
-        flatten_data = lookup_table.loc[:, ["Protein_run_idx", "Protein_feature_idx", "Intensity"]].values
+        flatten_data = data.loc[:, ["Protein_run_idx", "Protein_feature_idx", "Intensity"]].values
         self.flat_input = flatten_data
-        self.lookup_table = lookup_table
-
-        ## Flatten priors
-        priors['run_effect'] = priors['run_effect'].flatten()
-        priors['feature_effect'] = priors['feature_effect'].flatten()
-        self.priors = priors
+        self.lookup_table = data
 
     def get_priors(self, data):
 
         ## Initialize collection structures
-        priors = dict()
         run_priors = list()
         feature_priors = list()
 
-        for i in range(len(data)):
-            # conditions = len(np.unique(data[i][:, 0]))
-            runs = len(np.unique(data[i][:, 1]))
-            features = len(np.unique(data[i][:, 2]))
+        proteins = np.unique(data[:, 0])
+
+        for i in range(len(proteins)):
+
+            temp_data = data[data[:, 0] == proteins[i]]
+
+            runs = np.unique(temp_data[:, 1])
+            features = np.unique(temp_data[:, 2])
 
             ## Overall mean
-            overall_mean = data[i][:, 3][data[i][:, 3] != 0].mean()
-
-            # ## Calculate condition priors
-            # condition_effect = list()
-            # condition_std = list()
-            #
-            # for c in range(conditions):
-            #     condition_effect.append(data[i][:, 3][(data[i][:, 0] == c) & (data[i][:, 3] != 0)].mean() - overall_mean)
-            #     condition_std.append(data[i][:, 3][(data[i][:, 0] == c) & (data[i][:, 3] != 0)].std())
-
-            # condition_effect = jnp.array(condition_effect)
-            # condition_effect = np.nan_to_num(condition_effect, nan=0.)
-            # condition_std = jnp.array(condition_std)
-            # condition_std = np.nan_to_num(condition_std, nan=1.)
+            overall_mean = temp_data[:, 3][temp_data[:, 3] != 0].mean()
 
             ## Calculate run priors
             run_effect = list()
             run_std = list()
 
-            for r in range(runs):
-                run_effect.append(data[i][:, 3][(data[i][:, 1] == r) & (data[i][:, 3] != 0)].mean())
-                run_std.append(data[i][:, 3][(data[i][:, 1] == r) & (data[i][:, 3] != 0)].std())
+            for r in runs:
+                run_effect.append(temp_data[:, 3][(temp_data[:, 1] == r) & (temp_data[:, 3] != 0)].mean())
+                run_std.append(temp_data[:, 3][(temp_data[:, 1] == r) & (temp_data[:, 3] != 0)].std())
 
             run_effect = np.array(run_effect)
             run_effect = np.nan_to_num(run_effect, nan=0.)
             run_priors.append(run_effect)
 
-            # run_std = np.array(run_std)
-            # run_std = np.nan_to_num(run_std, nan=1.)
-
             ## Calculate feature priors
             feature_effect = list()
             feature_std = list()
 
-            for f in range(features):
-                feature_effect.append(data[i][:, 3][(data[i][:, 2] == f) & (data[i][:, 3] != 0)].mean() - overall_mean)
-                feature_std.append(data[i][:, 3][(data[i][:, 2] == f) & (data[i][:, 3] != 0)].std())
+            for f in features:
+                feature_effect.append(temp_data[:, 3][(temp_data[:, 2] == f) &
+                                                      (temp_data[:, 3] != 0)].mean() - overall_mean)
+                feature_std.append(temp_data[:, 3][(temp_data[:, 2] == f) & (temp_data[:, 3] != 0)].std())
 
             feature_effect = np.array(feature_effect)
             feature_effect = np.nan_to_num(feature_effect, nan=0.)
             feature_priors.append(feature_effect)
-            # feature_std = jnp.array(feature_std)
-            # feature_std = np.nan_to_num(feature_std, nan=1.)
-
-            # priors["overall_mean_{}".format(i)] = overall_mean
-            # priors["condition_effect_{}".format(i)] = condition_effect
-            # priors["condition_std_{}".format(i)] = condition_std
-            # priors["run_effect_{}".format(i)] = run_effect
-            # priors["run_std_{}".format(i)] = run_std
-            # priors["feature_effect_{}".format(i)] = feature_effect
-            # priors["feature_std_{}".format(i)] = feature_std
 
         priors = dict()
-        run_priors = np.array(run_priors)
-        feature_priors = np.array(feature_priors)
+        run_priors = np.concatenate(run_priors)
+        feature_priors = np.concatenate(feature_priors)
         priors["run_effect"] = run_priors
         priors["feature_effect"] = feature_priors
 
@@ -236,16 +185,15 @@ class IndependentModel:
 
     def train(self, data, warmup_steps, sample_steps):
         start = time.time()
-        format_data, params = self.format_data(data)
 
-        # missing = list()
-        # for i in range(len(format_data)):
-        #     missing.append(format_data[i][:, 3] == 1.)
-        # missing = np.array(missing)
-        missing = format_data[:, :, 4].flatten()
+        ## Format data for training
+        format_data = self.format_data(data)
+        missing = format_data[:, 4]
 
+        ## Get priors
         self.get_priors(format_data)
-        self.flatten_input(format_data, self.priors)
+        self.flatten_input(format_data)
+
         mcmc = MCMC(NUTS(two_nodes_run_level), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)#
 
         mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
@@ -255,23 +203,26 @@ class IndependentModel:
         print(mcmc.print_summary())
         print("Time to train: {}".format(keep))
 
-        idata = az.from_numpyro(mcmc)
-        self.az_mcmc_results = idata
+        # idata = az.from_numpyro(mcmc)
+        # self.az_mcmc_results = idata
         self.mcmc_samples = mcmc.get_samples()
 
 def main():
-    # with open(r"data/simulated_data_25.pickle", "rb") as input_file:
+    # with open(r"data/simulated_data_5.pickle", "rb") as input_file:
     #     simulator = pickle.load(input_file)
     # input_data = simulator.data
-    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/sim_data.csv")
-    # input_data = pd.read_csv(r"data/Choi2017_model_input.csv")
-    # sample_proteins = np.random.choice(input_data["Protein"].unique(), 100)
-    # input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
+    # input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/sim_data.csv")
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
+    sample_proteins = np.random.choice(input_data["Protein"].unique(), 1000)
+    input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 7500, 7500)
-    with open(r"/home/kohler.d/MSbayesImp/model_code/model_results/samples.pickle", "wb") as output_file:
+    model.train(input_data, 15**4, 15**4)
+    with open(r"/scratch/kohler.d/real_samples.pickle", "wb") as output_file:
         pickle.dump(model.mcmc_samples, output_file)
+
+    with open(r"/scratch/kohler.d/real_lookup_table.pickle", "wb") as output_file:
+        pickle.dump(model.lookup_table, output_file)
 
     # with open(r"model_results/az_mcmc_results.pickle", "wb") as output_file:
     #     pickle.dump(model.az_mcmc_results, output_file)
