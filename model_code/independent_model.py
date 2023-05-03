@@ -1,11 +1,25 @@
 
+!/usr/bin/env python3.7
+import sys
+import builtins
+import os
+sys.stdout = open("stdout.txt", "w", buffering=1)
+def print(text):
+    builtins.print(text)
+    os.fsync(sys.stdout)
+
+print("This is immediately written to stdout.txt")
+
 import numpyro
 from numpyro.infer import MCMC, NUTS
-numpyro.set_platform('gpu')
+# numpyro.set_platform('gpu')
+# numpyro.set_host_device_count(2)
 
+import jax
 from jax import numpy as jnp
 from jax import random
 # import az.from_numpyro as az_numpy
+# import arviz as az
 
 import time
 import pickle
@@ -14,6 +28,10 @@ import pandas as pd
 import numpy as np
 
 from simulation_code import DataSimulator
+
+from jax.lib import xla_bridge
+print(xla_bridge.get_backend().platform)
+print(jax.local_device_count())
 
 def two_nodes_run_level(data, missing, priors=None):
 
@@ -28,9 +46,10 @@ def two_nodes_run_level(data, missing, priors=None):
     sigma = numpyro.sample("error", numpyro.distributions.Exponential(1.))
 
     ## Get model param for each obs
-    ## TODO: Flatten the matrices to avoid having to pad with zeros
-    run_mu = run_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 0].astype(int)]
-    feature_mu = feature_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 1].astype(int)]
+    # run_mu = run_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 0].astype(int)]
+    # feature_mu = feature_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 1].astype(int)]
+    run_mu = run_mu_list[data[:, 0].astype(int)]
+    feature_mu = feature_mu_list[data[:, 1].astype(int)]
 
     ## Calculate missingness probability
     mnar_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * (run_mu + feature_mu)) - (.5*beta1*sigma)))
@@ -46,19 +65,19 @@ def two_nodes_run_level(data, missing, priors=None):
     ## Infer missing values
     adjustment = mnar/(mar+mnar)*(.5 * beta1 * sigma)
 
-    imp_means = (run_mu + feature_mu - adjustment).flatten()
+    imp_means = run_mu + feature_mu - adjustment
     imp = numpyro.sample(
         "imp", numpyro.distributions.Normal(
-            imp_means[missing.flatten()],
+            imp_means[missing==1],
             sigma).mask(False)
     )
 
     ## Add imputed missing values to observations
-    obs = data[:, :, 2]
-    observed = jnp.asarray(obs).at[missing].set(imp)
+    obs = data[:, 2]
+    observed = jnp.asarray(obs).at[missing==1].set(imp)
 
     ## Sample with obs
-    mean = jnp.where(missing,
+    mean = jnp.where(missing==1,
                      run_mu + feature_mu - adjustment,
                      run_mu + feature_mu)
 
@@ -103,13 +122,44 @@ class IndependentModel:
             # n_feat = len(temp_data.columns[temp_data.columns.str.contains("Dummy_Feature")])
             model_params[i] = {"Runs" : n_runs,
                                "Features" : n_feat}
-            temp_data = jnp.asarray(temp_data.drop(columns="Protein").values)
+            temp_data = jnp.asarray(temp_data.values)
             temp_data = np.nan_to_num(temp_data, nan=0.)
             input_data.append(temp_data)
 
         input_data = np.array(input_data)
 
         return input_data, model_params
+
+    def flatten_input(self, data, priors):
+
+        ## Format input data to be ready for flatten
+        data = data[:, :, :4].reshape(data.shape[0]*data.shape[1], 4)
+
+        lookup_table = pd.DataFrame(data, columns=["Protein", "Run", "Feature", "Intensity"])
+        lookup_table.loc[:, "list_index"] = np.arange(len(lookup_table))
+        lookup_table.loc[:, "Protein_run"] = lookup_table.loc[:, "Protein"].astype(str) + "_" + \
+            lookup_table.loc[:, "Run"].astype(str)
+        lookup_table.loc[:, "Protein_feature"] = lookup_table.loc[:, "Protein"].astype(str) + "_" + \
+                                             lookup_table.loc[:, "Feature"].astype(str)
+
+        ## TODO: This is sorta gross but cat.codes doesn't create these in order
+        lookup_table = pd.merge(lookup_table, pd.DataFrame({"Protein_run" : lookup_table.loc[:, "Protein_run"].unique(),
+                      "Protein_run_idx" : np.arange(len(lookup_table.loc[:, "Protein_run"].unique()))}),
+                 on="Protein_run", how="left")
+        lookup_table = pd.merge(lookup_table, pd.DataFrame({
+            "Protein_feature" : lookup_table.loc[:, "Protein_feature"].unique(),
+            "Protein_feature_idx" : np.arange(len(lookup_table.loc[:, "Protein_feature"].unique()))}),
+                 on="Protein_feature", how="left")
+
+        ## Return data for model and interpretation
+        flatten_data = lookup_table.loc[:, ["Protein_run_idx", "Protein_feature_idx", "Intensity"]].values
+        self.flat_input = flatten_data
+        self.lookup_table = lookup_table
+
+        ## Flatten priors
+        priors['run_effect'] = priors['run_effect'].flatten()
+        priors['feature_effect'] = priors['feature_effect'].flatten()
+        self.priors = priors
 
     def get_priors(self, data):
 
@@ -120,11 +170,11 @@ class IndependentModel:
 
         for i in range(len(data)):
             # conditions = len(np.unique(data[i][:, 0]))
-            runs = len(np.unique(data[i][:, 0]))
-            features = len(np.unique(data[i][:, 1]))
+            runs = len(np.unique(data[i][:, 1]))
+            features = len(np.unique(data[i][:, 2]))
 
             ## Overall mean
-            overall_mean = data[i][:, 2][data[i][:, 2] != 0].mean()
+            overall_mean = data[i][:, 3][data[i][:, 3] != 0].mean()
 
             # ## Calculate condition priors
             # condition_effect = list()
@@ -144,8 +194,8 @@ class IndependentModel:
             run_std = list()
 
             for r in range(runs):
-                run_effect.append(data[i][:, 2][(data[i][:, 0] == r) & (data[i][:, 2] != 0)].mean())
-                run_std.append(data[i][:, 2][(data[i][:, 0] == r) & (data[i][:, 2] != 0)].std())
+                run_effect.append(data[i][:, 3][(data[i][:, 1] == r) & (data[i][:, 3] != 0)].mean())
+                run_std.append(data[i][:, 3][(data[i][:, 1] == r) & (data[i][:, 3] != 0)].std())
 
             run_effect = np.array(run_effect)
             run_effect = np.nan_to_num(run_effect, nan=0.)
@@ -159,8 +209,8 @@ class IndependentModel:
             feature_std = list()
 
             for f in range(features):
-                feature_effect.append(data[i][:, 2][(data[i][:, 1] == f) & (data[i][:, 2] != 0)].mean() - overall_mean)
-                feature_std.append(data[i][:, 2][(data[i][:, 1] == f) & (data[i][:, 2] != 0)].std())
+                feature_effect.append(data[i][:, 3][(data[i][:, 2] == f) & (data[i][:, 3] != 0)].mean() - overall_mean)
+                feature_std.append(data[i][:, 3][(data[i][:, 2] == f) & (data[i][:, 3] != 0)].std())
 
             feature_effect = np.array(feature_effect)
             feature_effect = np.nan_to_num(feature_effect, nan=0.)
@@ -188,39 +238,43 @@ class IndependentModel:
         start = time.time()
         format_data, params = self.format_data(data)
 
-        missing = list()
-        for i in range(len(format_data)):
-            missing.append(format_data[i][:, 3] == 1.)
-        missing = np.array(missing)
+        # missing = list()
+        # for i in range(len(format_data)):
+        #     missing.append(format_data[i][:, 3] == 1.)
+        # missing = np.array(missing)
+        missing = format_data[:, :, 4].flatten()
 
         self.get_priors(format_data)
-        numpyro.set_host_device_count(4)
+        self.flatten_input(format_data, self.priors)
         mcmc = MCMC(NUTS(two_nodes_run_level), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)#
 
-        mcmc.run(random.PRNGKey(69), format_data, missing, priors=self.priors)
+        mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
         finish = time.time()
         keep = finish-start
 
         print(mcmc.print_summary())
         print("Time to train: {}".format(keep))
 
-        # idata = az.from_numpyro(mcmc)
-        # self.az_mcmc_results = idata
+        idata = az.from_numpyro(mcmc)
+        self.az_mcmc_results = idata
         self.mcmc_samples = mcmc.get_samples()
 
 def main():
-    with open(r"data/simulated_data_25.pickle", "rb") as input_file:
-        simulator = pickle.load(input_file)
-    input_data = simulator.data
+    # with open(r"data/simulated_data_25.pickle", "rb") as input_file:
+    #     simulator = pickle.load(input_file)
+    # input_data = simulator.data
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/sim_data.csv")
     # input_data = pd.read_csv(r"data/Choi2017_model_input.csv")
     # sample_proteins = np.random.choice(input_data["Protein"].unique(), 100)
     # input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 10000, 10000)
+    model.train(input_data, 7500, 7500)
+    with open(r"/home/kohler.d/MSbayesImp/model_code/model_results/samples.pickle", "wb") as output_file:
+        pickle.dump(model.mcmc_samples, output_file)
 
-    with open(r"model_results/az_mcmc_results.pickle", "wb") as output_file:
-        pickle.dump(model.az_mcmc_results, output_file)
+    # with open(r"model_results/az_mcmc_results.pickle", "wb") as output_file:
+    #     pickle.dump(model.az_mcmc_results, output_file)
 
 if __name__ == "__main__":
     main()
