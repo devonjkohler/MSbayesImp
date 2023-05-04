@@ -12,8 +12,8 @@ print("This is immediately written to stdout.txt")
 
 import numpyro
 from numpyro.infer import MCMC, NUTS
-numpyro.set_platform('gpu')
-# numpyro.set_host_device_count(2)
+numpyro.set_platform('cpu')
+numpyro.set_host_device_count(4)
 
 import jax
 from jax import numpy as jnp
@@ -38,7 +38,7 @@ def two_nodes_run_level(data, missing, priors=None):
     ## Initialize experiment wide params
     beta0 = numpyro.sample("beta0", numpyro.distributions.Normal(4., 1.))
     beta1 = numpyro.sample("beta1", numpyro.distributions.Normal(.5, .25))
-    mar = numpyro.sample("mar", numpyro.distributions.LogNormal(-3.5, .1))
+    mar = numpyro.sample("mar", numpyro.distributions.LogNormal(-3.5, .0001))
 
     ## Initialize model variables
     run_mu_list = numpyro.sample("mu", numpyro.distributions.Normal(priors["run_effect"], 2.))
@@ -46,8 +46,6 @@ def two_nodes_run_level(data, missing, priors=None):
     sigma = numpyro.sample("error", numpyro.distributions.Exponential(1.))
 
     ## Get model param for each obs
-    # run_mu = run_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 0].astype(int)]
-    # feature_mu = feature_mu_list[np.arange(run_mu_list.shape[0])[:, None], data[:,:, 1].astype(int)]
     run_mu = run_mu_list[data[:, 0].astype(int)]
     feature_mu = feature_mu_list[data[:, 1].astype(int)]
 
@@ -95,7 +93,12 @@ class IndependentModel:
         formatted_data = data.loc[:, ["Protein", "Condition", "Run", "Feature", "Intensity", "Missing"]]
         for col in ["Protein", "Condition", "Run", "Feature"]:
             if formatted_data[col].dtype == 'O':
+                formatted_data.loc[:, "{0}_original".format(col)] = formatted_data.loc[:, col]
                 formatted_data.loc[:, col] = formatted_data.loc[:, col].astype("category").cat.codes
+        self.original_data = formatted_data
+
+        ## Drop a pandas column if it contains a string
+        formatted_data = formatted_data[formatted_data.columns.drop(list(formatted_data.filter(regex='original')))]
 
         formatted_data.loc[:, "Condition_run"] = formatted_data.loc[:, "Condition"].astype(str) + "_" + \
                                                  formatted_data.loc[:, "Run"].astype(str)
@@ -119,7 +122,7 @@ class IndependentModel:
         data.loc[:, "Protein_feature"] = data.loc[:, "Protein"].astype(str) + "_" + data.loc[:, "Feature"].astype(str)
 
         ## TODO: This is sorta gross but cat.codes doesn't create these in order
-        data = pd.merge(data, pd.DataFrame({"Protein_run" : data.loc[:, "Protein_run"].unique(),
+        data = pd.merge(data, pd.DataFrame({"Protein_run": data.loc[:, "Protein_run"].unique(),
                       "Protein_run_idx" : np.arange(len(data.loc[:, "Protein_run"].unique()))}),
                  on="Protein_run", how="left")
         data = pd.merge(data, pd.DataFrame({
@@ -183,7 +186,15 @@ class IndependentModel:
 
         self.priors = priors
 
-    def train(self, data, warmup_steps, sample_steps):
+    def train(self,
+              data,
+              warmup_steps,
+              sample_steps,
+              save_final_state=False,
+              save_folder="",
+              load_previous_state=False,
+              previous_state=None):
+
         start = time.time()
 
         ## Format data for training
@@ -194,9 +205,14 @@ class IndependentModel:
         self.get_priors(format_data)
         self.flatten_input(format_data)
 
-        mcmc = MCMC(NUTS(two_nodes_run_level), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)#
-
+        # if load_previous_state:
+        #     with open(previous_state, "rb") as input_file:
+        #         mcmc = pickle.load(input_file)
+        #     mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
+        # else:
+        mcmc = MCMC(NUTS(two_nodes_run_level), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)  #
         mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
+
         finish = time.time()
         keep = finish-start
 
@@ -206,23 +222,61 @@ class IndependentModel:
         # idata = az.from_numpyro(mcmc)
         # self.az_mcmc_results = idata
         self.mcmc_samples = mcmc.get_samples()
+        # if save_final_state:
+        #     mcmc.post_warmup_state = mcmc.last_state
+        #     mcmc._cache = {}
+        #     with open(r"{0}mcmc_state.pickle".format(save_folder), "wb") as output_file:
+        #         pickle.dump(mcmc, output_file)
+
+    def compile_results(self):
+
+        ## Create dataframes to join in values
+        feature_join_df = pd.DataFrame({"Protein_feature_idx": np.arange(self.mcmc_samples["bF"].shape[1]),
+                                        "mean_feature": self.mcmc_samples["bF"].mean(axis=0),
+                                        "std_feature": self.mcmc_samples["bF"].std(axis=0)})
+        run_join_df = pd.DataFrame({"Protein_run_idx": np.arange(self.mcmc_samples["mu"].shape[1]),
+                                    "mean_run": self.mcmc_samples["mu"].mean(axis=0),
+                                    "std_run": self.mcmc_samples["mu"].std(axis=0)})
+        lookup_table = pd.merge(self.lookup_table, run_join_df, on="Protein_run_idx", how="left")
+        lookup_table = pd.merge(lookup_table, feature_join_df, on="Protein_feature_idx", how="left")
+
+        ## recover missing values
+        lookup_table.loc[:, "imputation_mean"] = np.nan
+        lookup_table.loc[:, "imputation_std"] = np.nan
+        lookup_table.loc[lookup_table["Intensity"] == 0, "imputation_mean"] = self.mcmc_samples["imp"].mean(axis=0)
+        lookup_table.loc[lookup_table["Intensity"] == 0, "imputation_std"] = self.mcmc_samples["imp"].std(axis=0)
+
+        lookup_table = pd.merge(lookup_table, self.original_data.loc[:, ["Protein", "Run", "Feature",
+                                                                         "Protein_original", "Condition",
+                                                                         "Run_original", "Feature_original"]],
+                                on=["Protein", "Run", "Feature"], how="left")
+
+        self.results_df = lookup_table
 
 def main():
     # with open(r"data/simulated_data_5.pickle", "rb") as input_file:
     #     simulator = pickle.load(input_file)
     # input_data = simulator.data
     # input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/sim_data.csv")
-    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
-    sample_proteins = np.random.choice(input_data["Protein"].unique(), 1000)
+    save_folder = r"/scratch/kohler.d/"
+
+    input_data = pd.read_csv(r"/scratch/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
+    sample_proteins = np.random.choice(input_data["Protein"].unique(), 500)
     input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 15**4, 15**4)
-    with open(r"/scratch/kohler.d/real_samples.pickle", "wb") as output_file:
+    model.train(input_data, 20000, 10000)
+                # save_final_state=True,
+                # save_folder=save_folder)
+                # load_previous_state=True,
+                # previous_state=r"model_results/mcmc_state.pickle")
+    model.compile_results()
+
+    with open(r"{0}mcmc_samples.pickle".format(save_folder), "wb") as output_file:
         pickle.dump(model.mcmc_samples, output_file)
 
-    with open(r"/scratch/kohler.d/real_lookup_table.pickle", "wb") as output_file:
-        pickle.dump(model.lookup_table, output_file)
+    with open(r"{0}results_df.pickle".format(save_folder), "wb") as output_file:
+        pickle.dump(model.results_df, output_file)
 
     # with open(r"model_results/az_mcmc_results.pickle", "wb") as output_file:
     #     pickle.dump(model.az_mcmc_results, output_file)
