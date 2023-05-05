@@ -12,8 +12,9 @@ print("This is immediately written to stdout.txt")
 
 import numpyro
 from numpyro.infer import MCMC, NUTS
+from numpyro.distributions import constraints
 numpyro.set_platform('cpu')
-numpyro.set_host_device_count(4)
+# numpyro.set_host_device_count(4)
 
 import jax
 from jax import numpy as jnp
@@ -33,16 +34,50 @@ from jax.lib import xla_bridge
 print(xla_bridge.get_backend().platform)
 print(jax.local_device_count())
 
+class beta0TruncatedNormal(numpyro.distributions.Normal):
+    support = constraints.interval(0., 10.)
+    def sample(self, key, sample_shape=()):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.
+                                                     ).sample(key, sample_shape=sample_shape)
+    def log_prob(self, value):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.).log_prob(value)
+
+class beta1TruncatedNormal(numpyro.distributions.Normal):
+    support = constraints.interval(.01, 1.)
+    def sample(self, key, sample_shape=()):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.01
+                                                     ).sample(key, sample_shape=sample_shape)
+    def log_prob(self, value):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.01).log_prob(value)
+
+class marTruncatedNormal(numpyro.distributions.Normal):
+    support = constraints.interval(.001, .1)
+    def sample(self, key, sample_shape=()):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.001
+                                                     ).sample(key, sample_shape=sample_shape)
+    def log_prob(self, value):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.001).log_prob(value)
+
+class runTruncatedNormal(numpyro.distributions.Normal):
+    support = constraints.interval(1., 40.)
+    def sample(self, key, sample_shape=()):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=1.
+                                                     ).sample(key, sample_shape=sample_shape)
+    def log_prob(self, value):
+        return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=1.).log_prob(value)
+
 def two_nodes_run_level(data, missing, priors=None):
 
     ## Initialize experiment wide params
-    beta0 = numpyro.sample("beta0", numpyro.distributions.Normal(4., 1.))
-    beta1 = numpyro.sample("beta1", numpyro.distributions.Normal(.5, .25))
-    mar = numpyro.sample("mar", numpyro.distributions.LogNormal(-3.5, .0001))
+    beta0 = numpyro.sample("beta0", beta0TruncatedNormal(4., 1.))
+    beta1 = numpyro.sample("beta1", beta1TruncatedNormal(.5, .25))
+    # mar = numpyro.sample("mar", marTruncatedLogNormal(-3.5, .0001))
+    mar = numpyro.sample("mar", marTruncatedNormal(.03, .0001))
 
     ## Initialize model variables
-    run_mu_list = numpyro.sample("mu", numpyro.distributions.Normal(priors["run_effect"], 2.))
-    feature_mu_list = numpyro.sample("bF", numpyro.distributions.Normal(priors["feature_effect"], 1.))
+    run_mu_list = numpyro.sample("mu", runTruncatedNormal(priors["run_effect"], 2.))
+    feature_mu_list = numpyro.sample("bF", numpyro.distributions.Normal(priors["feature_effect"], 1.
+                                                                        ))
     sigma = numpyro.sample("error", numpyro.distributions.Exponential(1.))
 
     ## Get model param for each obs
@@ -110,7 +145,50 @@ class IndependentModel:
 
         formatted_data = formatted_data.fillna(0.)
 
+        ## Identify values that cannot be imputed
+        formatted_data = self.id_no_impute(formatted_data)
+        self.no_impute_df = formatted_data[formatted_data["can_imp"] == 0]
+        print(self.no_impute_df)
+        formatted_data = formatted_data[formatted_data["can_imp"] == 1]
+        formatted_data = formatted_data.drop(columns=["can_imp"])
+
         return formatted_data.values
+
+    def id_no_impute(self, data):
+
+        ## Get runs with all missing values
+        missing_runs = data.groupby([data["Protein"], data["Run"]])["Missing"].sum().reset_index()
+
+        total_obs = data.groupby(["Protein", "Run"])["Feature"].count().values
+        missing_runs = missing_runs.loc[missing_runs["Missing"] == total_obs]
+
+
+        ## Get features with at least 2 obs
+        missing_features = data.groupby([data["Protein"], data["Feature"]])["Missing"].sum().reset_index()
+        total_runs = data.groupby(["Protein", "Feature"])["Run"].count().values
+        missing_features = missing_features.loc[missing_features["Missing"] > total_runs-2]
+
+        data.loc[:, "can_imp"] = 1
+
+        if len(missing_runs) > 0:
+            missing_runs.loc[:, "can_imp"] = 0
+            data = pd.merge(data, missing_runs.loc[:, ["Protein", "Run", "can_imp"]], how="left",
+                                  on=["Protein", "Run"])
+            data.loc[:, "can_imp"] = np.where(np.isnan(data.loc[:, "can_imp_y"]),
+                                                    data.loc[:, "can_imp_x"],
+                                                    data.loc[:, "can_imp_y"])
+            data = data.drop(columns=["can_imp_x", "can_imp_y"])
+
+        if len(missing_features) > 0:
+            missing_features.loc[:, "can_imp"] = 0
+            data = pd.merge(data, missing_features.loc[:, ["Protein", "Feature", "Impute"]], how="left",
+                                  on=["Protein", "Feature"])
+            data.loc[:, "can_imp"] = np.where(np.isnan(data.loc[:, "can_imp_y"]),
+                                                    data.loc[:, "can_imp_x"],
+                                                    data.loc[:, "can_imp_y"])
+            data = data.drop(columns=["can_imp_x", "can_imp_y"])
+
+        return data
 
     def flatten_input(self, data):
 
@@ -205,13 +283,14 @@ class IndependentModel:
         self.get_priors(format_data)
         self.flatten_input(format_data)
 
-        # if load_previous_state:
-        #     with open(previous_state, "rb") as input_file:
-        #         mcmc = pickle.load(input_file)
-        #     mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
-        # else:
-        mcmc = MCMC(NUTS(two_nodes_run_level), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)  #
-        mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
+        if load_previous_state:
+            with open(previous_state, "rb") as input_file:
+                mcmc = pickle.load(input_file)
+            mcmc.post_warmup_state = mcmc.last_state
+            mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
+        else:
+            mcmc = MCMC(NUTS(two_nodes_run_level), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)  #
+            mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
 
         finish = time.time()
         keep = finish-start
@@ -222,11 +301,10 @@ class IndependentModel:
         # idata = az.from_numpyro(mcmc)
         # self.az_mcmc_results = idata
         self.mcmc_samples = mcmc.get_samples()
-        # if save_final_state:
-        #     mcmc.post_warmup_state = mcmc.last_state
-        #     mcmc._cache = {}
-        #     with open(r"{0}mcmc_state.pickle".format(save_folder), "wb") as output_file:
-        #         pickle.dump(mcmc, output_file)
+        if save_final_state:
+            mcmc._cache = {}
+            with open(r"{0}mcmc_state.pickle".format(save_folder), "wb") as output_file:
+                pickle.dump(mcmc, output_file)
 
     def compile_results(self):
 
@@ -246,6 +324,9 @@ class IndependentModel:
         lookup_table.loc[lookup_table["Intensity"] == 0, "imputation_mean"] = self.mcmc_samples["imp"].mean(axis=0)
         lookup_table.loc[lookup_table["Intensity"] == 0, "imputation_std"] = self.mcmc_samples["imp"].std(axis=0)
 
+        ## Add back in runs that could not be imputed
+        lookup_table = pd.concat([lookup_table, self.no_impute_df.drop(columns=["can_imp"])])
+
         lookup_table = pd.merge(lookup_table, self.original_data.loc[:, ["Protein", "Run", "Feature",
                                                                          "Protein_original", "Condition",
                                                                          "Run_original", "Feature_original"]],
@@ -258,18 +339,19 @@ def main():
     #     simulator = pickle.load(input_file)
     # input_data = simulator.data
     # input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/sim_data.csv")
-    save_folder = r"/scratch/kohler.d/"
+    save_folder = r"/home/kohler.d/MSbayesImp/model_code/model_results/"
 
-    input_data = pd.read_csv(r"/scratch/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
-    sample_proteins = np.random.choice(input_data["Protein"].unique(), 500)
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
+    # input_data = pd.read_csv(r"data/Choi2017_model_input.csv")
+    sample_proteins = np.random.choice(input_data["Protein"].unique(), 500, replace=False)
     input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 20000, 10000)
-                # save_final_state=True,
-                # save_folder=save_folder)
-                # load_previous_state=True,
-                # previous_state=r"model_results/mcmc_state.pickle")
+    model.train(input_data, 10000, 10000,
+                save_final_state=True,
+                save_folder=save_folder,
+                load_previous_state=False,
+                previous_state=r"{0}mcmc_state.pickle".format(save_folder))
     model.compile_results()
 
     with open(r"{0}mcmc_samples.pickle".format(save_folder), "wb") as output_file:
