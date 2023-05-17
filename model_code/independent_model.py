@@ -36,7 +36,7 @@ print(xla_bridge.get_backend().platform)
 print(jax.local_device_count())
 
 class beta0TruncatedNormal(numpyro.distributions.Normal):
-    support = constraints.interval(0., 20.)
+    support = constraints.interval(0., 30.)
     def sample(self, key, sample_shape=()):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.
                                                      ).sample(key, sample_shape=sample_shape)
@@ -44,7 +44,7 @@ class beta0TruncatedNormal(numpyro.distributions.Normal):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.).log_prob(value)
 
 class beta1TruncatedNormal(numpyro.distributions.Normal):
-    support = constraints.interval(.01, 1.)
+    support = constraints.interval(.01, 2.)
     def sample(self, key, sample_shape=()):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.01
                                                      ).sample(key, sample_shape=sample_shape)
@@ -70,18 +70,16 @@ class runTruncatedNormal(numpyro.distributions.Normal):
 def feature_level_model(data, missing, priors):
 
     ## Initialize experiment wide params
-    beta0 = numpyro.sample("beta0", beta0TruncatedNormal(4., 1.))
-    beta1 = numpyro.sample("beta1", beta1TruncatedNormal(.5, .25))
+    beta0 = numpyro.sample("beta0", beta0TruncatedNormal(20., 1.))
+    beta1 = numpyro.sample("beta1", beta1TruncatedNormal(.5, .2))
     # mar = numpyro.sample("mar", marTruncatedLogNormal(-3.5, .0001))
-    mar = numpyro.sample("mar", marTruncatedNormal(.03, .0001))
+    mar = numpyro.sample("mar", marTruncatedNormal(.05, .001))
 
     ## Initialize model variables
-    run_mu_list = numpyro.sample("mu", runTruncatedNormal(priors["run_effect"],
-                                                          4.))#
+    run_mu_list = numpyro.sample("mu", runTruncatedNormal(priors["run_effect"], 5.))
     feature_mu_list = numpyro.sample("bF", numpyro.distributions.Normal(priors["feature_effect"], 1.))
     # sigma = numpyro.sample("error", numpyro.distributions.Exponential(1.))
-    # sigma_imp = numpyro.sample("error_imp", numpyro.distributions.Exponential(1.))
-    sigma_list = numpyro.sample("error", numpyro.distributions.Exponential(1.).expand([len(priors["run_effect"])]))
+    sigma_list = numpyro.sample("error", numpyro.distributions.Exponential(2.).expand([len(priors["run_effect"])]))
 
     ## Get model param for each obs
     run_mu = run_mu_list[data[:, 0].astype(int)]
@@ -102,12 +100,12 @@ def feature_level_model(data, missing, priors):
 
     ## Infer missing values
     adjustment = mnar/(mar+mnar)*(.5 * beta1 * sigma)
-
     imp_means = run_mu + feature_mu - adjustment
+    sigma_imp = numpyro.sample("error_imp", numpyro.distributions.Exponential(1.).expand([len(imp_means[missing == 1])]))
     imp = numpyro.sample(
         "imp", numpyro.distributions.Normal(
             imp_means[missing==1],
-            sigma[missing==1]).mask(False)
+            sigma_imp).mask(False)
     )
 
     ## Add imputed missing values to observations
@@ -392,17 +390,19 @@ def main():
     # input_data = pd.read_csv(r"../data/simulated_data_200.csv")
     # save_folder = r"../model_results/sim200_"
 
-    save_folder = r"../model_results/Choi2017_"
-    save_folder = r"/home/kohler.d/MSbayesImp/model_code/data/model_results/Choi2017_"
+    save_folder = r"../model_results/Choi2017/Choi2017_"
+    # save_folder = r"/home/kohler.d/MSbayesImp/model_code/data/model_results/Choi2017_"
     # input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
     input_data = pd.read_csv(r"../data/Choi2017_model_input.csv")
-    # sample_proteins = np.random.choice(input_data["Protein"].unique(), 19, replace=False)
-    # sample_proteins = np.append(sample_proteins, np.array(["O13539"]))
+    sample_proteins = np.random.choice(input_data["Protein"].unique(), 1000, replace=False)
+    sample_proteins = np.append(sample_proteins, np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
+                                                           "P55249", "P44015", "P44374", "P44983", "P55249", "P48363",
+                                                           "P07834"]))
     # sample_proteins = np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373","P55249"])
-    # input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
+    input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 1000, 1000,
+    model.train(input_data, 2000, 1000,
                 save_final_state=True,
                 save_folder=save_folder,
                 load_previous_state=False,
