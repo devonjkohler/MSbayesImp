@@ -36,7 +36,7 @@ print(xla_bridge.get_backend().platform)
 print(jax.local_device_count())
 
 class beta0TruncatedNormal(numpyro.distributions.Normal):
-    support = constraints.interval(0., 30.)
+    support = constraints.interval(0., 10.)
     def sample(self, key, sample_shape=()):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.
                                                      ).sample(key, sample_shape=sample_shape)
@@ -44,7 +44,7 @@ class beta0TruncatedNormal(numpyro.distributions.Normal):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.).log_prob(value)
 
 class beta1TruncatedNormal(numpyro.distributions.Normal):
-    support = constraints.interval(.01, 2.)
+    support = constraints.interval(.01, 5.)
     def sample(self, key, sample_shape=()):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.01
                                                      ).sample(key, sample_shape=sample_shape)
@@ -69,55 +69,58 @@ class runTruncatedNormal(numpyro.distributions.Normal):
 
 def feature_level_model(data, missing, priors):
 
-    ## Initialize experiment wide params
-    beta0 = numpyro.sample("beta0", beta0TruncatedNormal(20., 1.))
-    beta1 = numpyro.sample("beta1", beta1TruncatedNormal(.5, .2))
+
+    # Initialize experiment wide params
+    beta0 = numpyro.sample("beta0", beta0TruncatedNormal(6., .1))
+    beta1 = numpyro.sample("beta1", beta1TruncatedNormal(.33, .01))
     # mar = numpyro.sample("mar", marTruncatedLogNormal(-3.5, .0001))
     mar = numpyro.sample("mar", marTruncatedNormal(.05, .001))
 
-    ## Initialize model variables
-    run_mu_list = numpyro.sample("mu", runTruncatedNormal(priors["run_effect"], 5.))
+    # Initialize model variables
+    run_mu_list = numpyro.sample("mu", runTruncatedNormal(priors["run_effect"], 10.))
     feature_mu_list = numpyro.sample("bF", numpyro.distributions.Normal(priors["feature_effect"], 1.))
     # sigma = numpyro.sample("error", numpyro.distributions.Exponential(1.))
     sigma_list = numpyro.sample("error", numpyro.distributions.Exponential(2.).expand([len(priors["run_effect"])]))
 
-    ## Get model param for each obs
+    # Get model param for each obs
     run_mu = run_mu_list[data[:, 0].astype(int)]
     feature_mu = feature_mu_list[data[:, 1].astype(int)]
-
     sigma = sigma_list[data[:, 0].astype(int)]
 
-    ## Calculate missingness probability
-    mnar_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * (run_mu + feature_mu)) - (.5*beta1*sigma)))
-    mnar_not_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * (run_mu + feature_mu))))
-    mnar = jnp.where(missing, mnar_missing, mnar_not_missing)
+    # Infer missing values
+    # adjustment = .5 * beta1 * sigma
+    imp_means = run_mu + feature_mu#- adjustment
+    # sigma_imp = numpyro.sample("error_imp",
+    #                            numpyro.distributions.Exponential(1.).expand([len(imp_means[missing == 1])]))
+    imp = numpyro.sample(
+        "imp", numpyro.distributions.Normal(
+            imp_means[missing == 1],
+            sigma[missing == 1]).mask(False)
+    )
 
-    missing_prob = mar + ((1 - mar) * mnar)
+    # Add imputed missing values to observations
+    obs = data[:, 2]
+    observed = jnp.asarray(obs).at[missing == 1].set(imp)
+
+    # Sample with obs
+    mean = run_mu + feature_mu
+    # jnp.where(missing == 1,
+    #                  run_mu + feature_mu - adjustment,
+    #                  run_mu + feature_mu)
+
+    full_obs = numpyro.sample("obs", numpyro.distributions.Normal(mean, sigma), obs=observed)
+
+    # Calculate missingness probability
+    mnar_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * full_obs)))
+    # mnar_not_missing = 1 / (1 + jnp.exp(-beta0 + (beta1 * (run_mu + feature_mu))))
+    # mnar = jnp.where(missing, mnar_missing, mnar_not_missing)
+
+    missing_prob = mar + ((1 - mar) * mnar_missing)
 
     numpyro.distributions.constraints.positive(numpyro.sample("missing",
                           numpyro.distributions.Bernoulli(probs=missing_prob),
                           obs=missing))
 
-    ## Infer missing values
-    adjustment = mnar/(mar+mnar)*(.5 * beta1 * sigma)
-    imp_means = run_mu + feature_mu - adjustment
-    sigma_imp = numpyro.sample("error_imp", numpyro.distributions.Exponential(1.).expand([len(imp_means[missing == 1])]))
-    imp = numpyro.sample(
-        "imp", numpyro.distributions.Normal(
-            imp_means[missing==1],
-            sigma_imp).mask(False)
-    )
-
-    ## Add imputed missing values to observations
-    obs = data[:, 2]
-    observed = jnp.asarray(obs).at[missing==1].set(imp)
-
-    ## Sample with obs
-    mean = jnp.where(missing==1,
-                     run_mu + feature_mu - adjustment,
-                     run_mu + feature_mu)
-
-    numpyro.sample("obs", numpyro.distributions.Normal(mean, sigma), obs=observed)
 
 class IndependentModel:
 
@@ -335,7 +338,8 @@ class IndependentModel:
             mcmc.post_warmup_state = mcmc.last_state
             mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
         else:
-            mcmc = MCMC(NUTS(feature_level_model), num_warmup=warmup_steps, num_samples=sample_steps, num_chains=1)  #
+            mcmc = MCMC(NUTS(feature_level_model, max_tree_depth=10), num_warmup=warmup_steps, num_samples=sample_steps,
+                        num_chains=1)  #
             mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
 
         finish = time.time()
@@ -390,19 +394,21 @@ def main():
     # input_data = pd.read_csv(r"../data/simulated_data_200.csv")
     # save_folder = r"../model_results/sim200_"
 
-    save_folder = r"../model_results/Choi2017/Choi2017_"
-    # save_folder = r"/home/kohler.d/MSbayesImp/model_code/data/model_results/Choi2017_"
-    # input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
-    input_data = pd.read_csv(r"../data/Choi2017_model_input.csv")
-    sample_proteins = np.random.choice(input_data["Protein"].unique(), 1000, replace=False)
-    sample_proteins = np.append(sample_proteins, np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
-                                                           "P55249", "P44015", "P44374", "P44983", "P55249", "P48363",
-                                                           "P07834"]))
-    # sample_proteins = np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373","P55249"])
+    # save_folder = r"../model_results/Choi2017/Choi2017_test_"
+    save_folder = r"/home/kohler.d/MSbayesImp/model_code/data/model_results/Choi2017_"
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
+    # input_data = pd.read_csv(r"../data/Choi2017_model_input.csv")
+    # sample_proteins = np.random.choice(input_data["Protein"].unique(), 100, replace=False)
+    # sample_proteins = np.append(sample_proteins, np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
+    #                                                        "P55249", "P44015", "P44374", "P44983", "P55249", "P48363",
+    #                                                        "P07834"]))
+    # pd.DataFrame({"sample_prots" : sample_proteins}).to_csv("{0}1000_sample_prots.csv".format(save_folder))
+    # sample_proteins = np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
+    #                             "P55249", "P44015", "P44374", "P44983", "P55249", "P48363", "P07834"])
     input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 2000, 1000,
+    model.train(input_data, 1000, 1000,
                 save_final_state=True,
                 save_folder=save_folder,
                 load_previous_state=False,
