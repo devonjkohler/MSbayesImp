@@ -3,7 +3,7 @@
 import sys
 import builtins
 import os
-sys.stdout = open("stdout_FP.txt", "w", buffering=1)
+sys.stdout = open("../stdout_loop.txt", "w", buffering=1)
 def print(text):
     builtins.print(text)
     os.fsync(sys.stdout)
@@ -70,8 +70,8 @@ def feature_level_model(data, missing, priors):
 
 
     # Initialize experiment wide params
-    beta0 = numpyro.sample("beta0", numpyro.distributions.LogNormal(1.85, .5))
-    beta1 = numpyro.sample("beta1", numpyro.distributions.LogNormal(-1, .5))
+    beta0 = numpyro.sample("beta0", numpyro.distributions.LogNormal(2.5, .5))
+    beta1 = numpyro.sample("beta1", numpyro.distributions.LogNormal(-.5, .5))
     # mar = numpyro.sample("mar", marTruncatedLogNormal(-3.5, .0001))
     mar = numpyro.sample("mar", numpyro.distributions.Beta(1, 20))
 
@@ -88,7 +88,7 @@ def feature_level_model(data, missing, priors):
 
     # Infer missing values
     adjustment = .5 * sigma#.5 * beta1 * sigma
-    imp_means = run_mu + feature_mu - adjustment
+    imp_means = run_mu + feature_mu# - adjustment
     # sigma_imp = numpyro.sample("error_imp",
     #                            numpyro.distributions.Exponential(1.).expand([len(imp_means[missing == 1])]))
     imp = numpyro.sample(
@@ -102,10 +102,10 @@ def feature_level_model(data, missing, priors):
     observed = jnp.asarray(obs).at[missing == 1].set(imp)
 
     # Sample with obs
-    # mean = run_mu + feature_mu
-    mean = jnp.where(missing == 1,
-                     run_mu + feature_mu - adjustment,
-                     run_mu + feature_mu)
+    mean = run_mu + feature_mu
+    # mean = jnp.where(missing == 1,
+    #                  run_mu + feature_mu - adjustment,
+    #                  run_mu + feature_mu)
 
     full_obs = numpyro.sample("obs", numpyro.distributions.Normal(mean, sigma), obs=observed)
 
@@ -387,41 +387,40 @@ class IndependentModel:
         self.results_df = lookup_table
 
 def main():
-    # with open(r"data/simulated_data_200.pickle", "rb") as input_file:
-    #     simulator = pickle.load(input_file)
-    # input_data = simulator.data
-    # input_data = pd.read_csv(r"../data/simulated_data_200.csv")
-    # save_folder = r"../model_results/sim200_"
 
-    # save_folder = r"../model_results/FP/FP_"
-    save_folder = r"/home/kohler.d/MSbayesImp/model_results/FP_"
-    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/data/FP_model_input_normalized.csv")
-    #input_data = pd.read_csv(r"../data/FP_model_input_normalized.csv")
-    #sample_proteins = np.random.choice(input_data["Protein"].unique(), 200, replace=False)
-    # sample_proteins = np.append(sample_proteins, np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
-    #                                                        "P55249", "P44015", "P44374", "P44983", "P55249", "P48363",
-    #                                                        "P07834"]))
-    # pd.DataFrame({"sample_prots" : sample_proteins}).to_csv("{0}1000_sample_prots.csv".format(save_folder))
-    # sample_proteins = np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
-    #                             "P55249", "P44015", "P44374", "P44983", "P55249", "P48363", "P07834"])
-    #input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/data/Choi2017_model_input.csv")
+    total_proteins = input_data["Protein"].unique()
 
-    model = IndependentModel()
-    model.train(input_data, 3000, 1000,
-                save_final_state=True,
-                save_folder=save_folder,
-                load_previous_state=False,
-                previous_state=r"{0}mcmc_state.pickle".format(save_folder))
-    model.compile_results(sim=False)
+    counter = 0
+    loop = 0
 
-    with open(r"{0}mcmc_samples.pickle".format(save_folder), "wb") as output_file:
-        pickle.dump(model.mcmc_samples, output_file)
+    while counter < total_proteins:
+        save_folder = r"/scratch/kohler.d/results/loop_{0}_".format(loop)
+        sample_proteins = total_proteins[counter:counter+250]
+        temp_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
-    with open(r"{0}results_df.pickle".format(save_folder), "wb") as output_file:
-        pickle.dump(model.results_df, output_file)
+        model = IndependentModel()
+        model.train(temp_data, 500, 500,
+                    save_final_state=True,
+                    save_folder=save_folder,
+                    load_previous_state=False,
+                    previous_state=r"{0}mcmc_state.pickle".format(save_folder))
+        model.compile_results(sim=False)
 
-    with open(r"{0}summary_stats.pickle".format(save_folder), "wb") as output_file:
-        pickle.dump(model.summary_stats, output_file)
+        with open(r"{0}mcmc_samples.pickle".format(save_folder), "wb") as output_file:
+            pickle.dump(model.mcmc_samples, output_file)
+
+        with open(r"{0}results_df.pickle".format(save_folder), "wb") as output_file:
+            pickle.dump(model.results_df, output_file)
+
+        with open(r"{0}summary_stats.pickle".format(save_folder), "wb") as output_file:
+            pickle.dump(model.summary_stats, output_file)
+
+        counter += 250
+        loop += 1
+
+        print(counter)
+        print(loop)
 
 if __name__ == "__main__":
     main()

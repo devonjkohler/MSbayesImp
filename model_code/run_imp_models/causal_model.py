@@ -292,15 +292,15 @@ class CausalModel:
         #     print(samples[i].mean())
 
         idata = az.from_numpyro(mcmc)
-        with open(r"data/az_mcmc_causal_two.pickle", "wb") as output_file:
+        with open(r"../data/az_mcmc_causal_two.pickle", "wb") as output_file:
             pickle.dump(idata, output_file)
 
         idata = az.from_numpyro(run_mcmc)
-        with open(r"data/az_run_mcmc_causal_two.pickle", "wb") as output_file:
+        with open(r"../data/az_run_mcmc_causal_two.pickle", "wb") as output_file:
             pickle.dump(idata, output_file)
 
 def main():
-    with open(r"data/simulated_data_two.pickle", "rb") as input_file:
+    with open(r"../data/simulated_data_two.pickle", "rb") as input_file:
         simulator = pickle.load(input_file)
 
     model = CausalModel(simulator.network)

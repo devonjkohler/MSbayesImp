@@ -304,19 +304,19 @@ class CausalModel:
         dist = lambda p1, p2: np.sqrt(((p1 - p2) ** 2).sum())
         dm = np.asarray([[dist(p1, p2) for p2 in obs_samples] for p1 in obs_samples])
 
-        with open(r"data/dm.pickle", "wb") as output_file:
+        with open(r"../data/dm.pickle", "wb") as output_file:
             pickle.dump(dm, output_file)
 
         idata = az.from_numpyro(mcmc)
-        with open(r"data/az_mcmc_gp_two.pickle", "wb") as output_file:
+        with open(r"../data/az_mcmc_gp_two.pickle", "wb") as output_file:
             pickle.dump(idata, output_file)
 
         idata = az.from_numpyro(run_mcmc)
-        with open(r"data/az_run_mcmc_gp_two.pickle", "wb") as output_file:
+        with open(r"../data/az_run_mcmc_gp_two.pickle", "wb") as output_file:
             pickle.dump(idata, output_file)
 
 def main():
-    with open(r"data/simulated_data_ten.pickle", "rb") as input_file:
+    with open(r"../data/simulated_data_ten.pickle", "rb") as input_file:
         simulator = pickle.load(input_file)
 
     model = CausalModel(simulator.network)
