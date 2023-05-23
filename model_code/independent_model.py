@@ -3,12 +3,11 @@
 import sys
 import builtins
 import os
-# sys.stdout = open("stdout.txt", "w", buffering=1)
-# def print(text):
-#     builtins.print(text)
-#     os.fsync(sys.stdout)
-#
-# print("This is immediately written to stdout.txt")
+sys.stdout = open("stdout_FP.txt", "w", buffering=1)
+def print(text):
+    builtins.print(text)
+    os.fsync(sys.stdout)
+print("This is immediately written to stdout.txt")
 
 import numpyro
 from numpyro.infer import MCMC, NUTS
@@ -60,7 +59,7 @@ class marTruncatedNormal(numpyro.distributions.Normal):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=0.001).log_prob(value)
 
 class runTruncatedNormal(numpyro.distributions.Normal):
-    support = constraints.interval(10., 40.)
+    support = constraints.interval(1., 40.)
     def sample(self, key, sample_shape=()):
         return numpyro.distributions.TruncatedNormal(self.loc, self.scale, low=1.
                                                      ).sample(key, sample_shape=sample_shape)
@@ -195,7 +194,7 @@ class IndependentModel:
 
         if len(missing_features) > 0:
             missing_features.loc[:, "can_imp"] = 0
-            data = pd.merge(data, missing_features.loc[:, ["Protein", "Feature", "Impute"]], how="left",
+            data = pd.merge(data, missing_features.loc[:, ["Protein", "Feature", "can_imp"]], how="left",
                                   on=["Protein", "Feature"])
             data.loc[:, "can_imp"] = np.where(np.isnan(data.loc[:, "can_imp_y"]),
                                                     data.loc[:, "can_imp_x"],
@@ -394,21 +393,21 @@ def main():
     # input_data = pd.read_csv(r"../data/simulated_data_200.csv")
     # save_folder = r"../model_results/sim200_"
 
-    save_folder = r"../model_results/Choi2017/Choi2017_"
-    # save_folder = r"/home/kohler.d/MSbayesImp/model_code/data/model_results/Choi2017_"
-    # input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/model_code/data/Choi2017_model_input.csv")
-    input_data = pd.read_csv(r"../data/Choi2017_model_input.csv")
-    sample_proteins = np.random.choice(input_data["Protein"].unique(), 100, replace=False)
-    sample_proteins = np.append(sample_proteins, np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
-                                                           "P55249", "P44015", "P44374", "P44983", "P55249", "P48363",
-                                                           "P07834"]))
+    # save_folder = r"../model_results/FP/FP_"
+    save_folder = r"/home/kohler.d/MSbayesImp/model_results/FP_"
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/data/FP_model_input_normalized.csv")
+    #input_data = pd.read_csv(r"../data/FP_model_input_normalized.csv")
+    #sample_proteins = np.random.choice(input_data["Protein"].unique(), 200, replace=False)
+    # sample_proteins = np.append(sample_proteins, np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
+    #                                                        "P55249", "P44015", "P44374", "P44983", "P55249", "P48363",
+    #                                                        "P07834"]))
     # pd.DataFrame({"sample_prots" : sample_proteins}).to_csv("{0}1000_sample_prots.csv".format(save_folder))
     # sample_proteins = np.array(["O13539", "D6VTK4", "P07275", "P36123", "P53905", "Q03373",
     #                             "P55249", "P44015", "P44374", "P44983", "P55249", "P48363", "P07834"])
-    input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
+    #input_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
     model = IndependentModel()
-    model.train(input_data, 1000, 1000,
+    model.train(input_data, 3000, 1000,
                 save_final_state=True,
                 save_folder=save_folder,
                 load_previous_state=False,
