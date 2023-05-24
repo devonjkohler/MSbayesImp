@@ -3,7 +3,7 @@
 import sys
 import builtins
 import os
-sys.stdout = open("../stdout_loop.txt", "w", buffering=1)
+sys.stdout = open("stdout_loop.txt", "w", buffering=1)
 def print(text):
     builtins.print(text)
     os.fsync(sys.stdout)
@@ -13,7 +13,7 @@ import numpyro
 from numpyro.infer import MCMC, NUTS
 from numpyro.distributions import constraints
 numpyro.set_platform('cpu')
-numpyro.set_host_device_count(4)
+numpyro.set_host_device_count(8)
 
 import jax
 from jax import numpy as jnp
@@ -338,7 +338,7 @@ class IndependentModel:
             mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
         else:
             mcmc = MCMC(NUTS(feature_level_model, max_tree_depth=10), num_warmup=warmup_steps, num_samples=sample_steps,
-                        num_chains=4)  #
+                        num_chains=8)  #
             mcmc.run(random.PRNGKey(69), self.flat_input, missing, priors=self.priors)
 
         finish = time.time()
@@ -388,19 +388,19 @@ class IndependentModel:
 
 def main():
 
-    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/data/Choi2017_model_input.csv")
+    input_data = pd.read_csv(r"/home/kohler.d/MSbayesImp/data/FP_model_input_normalized.csv")
     total_proteins = input_data["Protein"].unique()
 
     counter = 0
     loop = 0
 
-    while counter < total_proteins:
-        save_folder = r"/scratch/kohler.d/results/loop_{0}_".format(loop)
+    while counter < len(total_proteins):
+        save_folder = r"/scratch/kohler.d/results/FP_loop_{0}_".format(loop)
         sample_proteins = total_proteins[counter:counter+250]
         temp_data = input_data.loc[input_data["Protein"].isin(sample_proteins)]
 
         model = IndependentModel()
-        model.train(temp_data, 500, 500,
+        model.train(temp_data, 1000, 1000,
                     save_final_state=True,
                     save_folder=save_folder,
                     load_previous_state=False,
